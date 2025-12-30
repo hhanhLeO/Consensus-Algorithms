@@ -1,0 +1,78 @@
+syntax = "proto3";
+
+package pbft;
+
+service PBFTNode {
+    rpc ClientRequest (ClientBlockRequest) returns (ClientReply);
+    rpc PrePrepare (PrePrepareMsg) returns (Ack);
+    rpc Prepare (PrepareMsg) returns (Ack);
+    rpc Commit (CommitMsg) returns (Ack);
+    rpc NodeStatus (NodeStatusRequest) returns (NodeStatusReply);
+}
+
+message Block {
+    int32 height = 1;
+    string prev_hash = 2;
+    string hash = 3;
+}
+
+message ClientBlockRequest {
+    Block block = 1;
+}
+
+message ClientReply {
+    bool success = 1;
+    string message = 2;
+}
+
+message PrePrepareMsg {
+    int32 view = 1;
+    int32 seq = 2;
+    Block block = 3;
+    int32 sender_id = 4;
+}
+
+message PrepareMsg {
+    int32 view = 1;
+    int32 seq = 2;
+    string block_hash = 3;
+    int32 sender_id = 4;
+}
+
+message CommitMsg {
+    int32 view = 1;
+    int32 seq = 2;
+    string block_hash = 3;
+    int32 sender_id = 4;
+}
+
+message Ack {
+    bool success = 1;
+}
+
+// ========== NodeStatus ==========
+message NodeStatusRequest {}
+
+message BlockCount {
+    string block_hash = 1;
+    int32 count = 2;
+}
+
+message PrepareMap {
+    int32 view = 1;
+    int32 seq = 2;
+    repeated BlockCount block_counts = 3;
+}
+
+message CommitMap {
+    int32 view = 1;
+    int32 seq = 2;
+    repeated BlockCount block_counts = 3;
+}
+
+message NodeStatusReply {
+    repeated Block blockchain = 1;
+    repeated PrepareMap prepares = 2;
+    repeated int32 blacklist = 3;
+    repeated CommitMap commits = 4;
+}
