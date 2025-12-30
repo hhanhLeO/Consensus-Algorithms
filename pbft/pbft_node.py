@@ -38,6 +38,9 @@ class PBFTNode(pbft_pb2_grpc.PBFTNodeServicer):
         self.prepares = defaultdict(lambda: defaultdict(set))  # {(v,s): {hash: set(sender_ids)}}
         self.commits  = defaultdict(lambda: defaultdict(set))  # {(v,s): {hash: set(sender_ids)}}
 
+        self.pending_prepares = defaultdict(list)  # {(view, seq): [PrepareMsg, ...]}
+        self.pending_commits  = defaultdict(list)  # {(view, seq): [CommitMsg, ...]}
+
         # Track highest committed seq (simple sequential guard)
         self.last_committed_seq = 0
 
@@ -115,10 +118,6 @@ class PBFTNode(pbft_pb2_grpc.PBFTNodeServicer):
     def PrePrepare(self, msg, context):
         tag_seq = self.log_tag(view=msg.view, seq=msg.seq, block_hash=msg.block.hash)
 
-        if msg.sender_id in self.blacklist:
-            self.logger.warning(f"{tag_seq} - [blocked]: Node {msg.sender_id} in BlackList")
-            return pbft_pb2.Ack(success=False)
-
         # Only accept pre-prepare from current primary
         if msg.sender_id != self.primary():
             self.logger.warning(f"{tag_seq} - [ignored]: PrePrepare from non-primary")
@@ -127,57 +126,55 @@ class PBFTNode(pbft_pb2_grpc.PBFTNodeServicer):
         # Validate chain continuity
         prev = "_XMAS_" if not self.blockchain else self.blockchain[-1].hash
         if msg.block.prev_hash != prev:
-            self.logger.error(f"{tag_seq}: Invalid block prev_hash from Node {msg.sender_id}")
+            self.logger.error(f"{tag_seq} - [error]: Invalid prev_hash in PrePrepare from Node {msg.sender_id}")
             return pbft_pb2.Ack(success=False)
 
         key = (msg.view, msg.seq)
-        # Record pre-prepare proposal
         self.pre_prepares[key] = msg.block
 
-        # Byzantine behavior (only alters hash in prepare)
+        # Reprocess queued Prepare/Commit messages
+        for pm in self.pending_prepares.pop(key, []):
+            self.Prepare(pm, context=None)
+        for cm in self.pending_commits.pop(key, []):
+            self.Commit(cm, context=None)
+
+        # Byzantine node alters hash only in Prepare
         block_hash = msg.block.hash
         if self.is_byzantine:
             block_hash = "_FAKE_"
-            self.logger.warning(f"{tag_seq} - [byzantine]: Altering block hash on Prepare!")
+            self.logger.warning(f"{tag_seq} - [byzantine]: Altering block hash in Prepare")
 
-        # All replicas (including primary) send Prepare
-        prepare = pbft_pb2.PrepareMsg(
-            view=msg.view,
-            seq=msg.seq,
-            block_hash=block_hash,
-            sender_id=self.id
-        )
-        self.logger.info(f"{tag_seq}: Broadcasting Prepare (including self)")
+        # Broadcast Prepare (including self)
+        prepare = pbft_pb2.PrepareMsg(view=msg.view, seq=msg.seq, block_hash=block_hash, sender_id=self.id)
+        self.logger.info(f"{tag_seq} - [state]: Broadcasting Prepare (including self)")
         self.broadcast("Prepare", prepare)
         return pbft_pb2.Ack(success=True)
 
-    # ========== Prepare ==========
+    # ========== Prepare ==========    
     def Prepare(self, msg, context):
         tag_seq = self.log_tag(view=msg.view, seq=msg.seq, block_hash=msg.block_hash)
 
         if msg.sender_id in self.blacklist:
-            self.logger.warning(f"{tag_seq} - [blocked]: Node {msg.sender_id} in BlackList")
+            self.logger.warning(f"{tag_seq} - [blocked]: Node {msg.sender_id} in blacklist")
             return pbft_pb2.Ack(success=False)
 
         key = (msg.view, msg.seq)
 
-        # Must have seen a valid pre-prepare for this (view, seq)
+        # Queue if PrePrepare not yet recorded
         if key not in self.pre_prepares:
-            self.logger.warning(f"{tag_seq} - [ignored]: No PrePrepare recorded yet")
+            self.pending_prepares[key].append(msg)
+            self.logger.warning(f"{tag_seq} - [queued]: Prepare before PrePrepare")
             return pbft_pb2.Ack(success=False)
 
-        # Prepare must match the digest in pre-prepare
         proposed_block = self.pre_prepares[key]
+
         if proposed_block.hash != msg.block_hash:
-            self.logger.warning(f"{tag_seq} - [mismatch]: Prepare hash != PrePrepare hash")
-            # Only record mismatches; blacklist will be created after a majority is determined.
-            # Record the sender in the incorrect hash group.
             wrong_set = self.prepares[key][msg.block_hash]
             wrong_set.add(msg.sender_id)
+            self.logger.warning(f"{tag_seq} - [mismatch]: Prepare hash does not match PrePrepare hash")
             self._try_blacklist_after_majority(key)
             return pbft_pb2.Ack(success=False)
 
-        # Add sender to prepare set (correct hash)
         sender_set = self.prepares[key][msg.block_hash]
         if msg.sender_id in sender_set:
             self.logger.warning(f"{tag_seq} - [ignored]: Duplicate Prepare from Node {msg.sender_id}")
@@ -186,37 +183,32 @@ class PBFTNode(pbft_pb2_grpc.PBFTNodeServicer):
         sender_set.add(msg.sender_id)
         self.logger.info(f"{tag_seq} - [PREPARE]: Count={len(sender_set)}")
 
-        # After adding, try to identify the majority and blacklist the incorrect hashes.
+        # Check majority and blacklist conflicting senders
         self._try_blacklist_after_majority(key)
 
-        # prepared: pre-prepare + 2f prepares
+        # Prepared: pre-prepare + 2f prepares
         if len(sender_set) >= 2 * self.f:
             self.prepared.add((msg.view, msg.seq, msg.block_hash))
 
-            # Immediately add self-commit locally before broadcasting
+            # Record local commit
             commit_set_local = self.commits[key][msg.block_hash]
             if self.id not in commit_set_local:
                 commit_set_local.add(self.id)
                 self.logger.info(f"{tag_seq} - [COMMIT][local]: Self-commit recorded. Count={len(commit_set_local)}")
 
-            # Broadcast commit (including self handler)
-            commit = pbft_pb2.CommitMsg(
-                view=msg.view,
-                seq=msg.seq,
-                block_hash=msg.block_hash,
-                sender_id=self.id
-            )
+            # Broadcast Commit
+            commit = pbft_pb2.CommitMsg(view=msg.view, seq=msg.seq, block_hash=msg.block_hash, sender_id=self.id)
             self.logger.info(f"{tag_seq} - [state]: PREPARED. Broadcasting Commit (including self)")
             self.broadcast("Commit", commit)
 
-            # Check if local commit count already reaches threshold
+            # Append block if local commits already reach threshold
             if len(commit_set_local) >= (2 * self.f + 1):
                 if (not self.blockchain) or (self.blockchain[-1].hash == proposed_block.prev_hash):
                     self.blockchain.append(proposed_block)
                     self.last_committed_seq = msg.seq
                     self.logger.info(f"{tag_seq} - [state]: COMMITTED-LOCAL (prepared + 2f+1 local commits)")
                 else:
-                    self.logger.error(f"{tag_seq} - [error]: Prev_hash mismatch at commit; not appending")
+                    self.logger.error(f"{tag_seq} - [error]: Prev_hash mismatch at commit; block not appended")
 
         return pbft_pb2.Ack(success=True)
 
@@ -245,48 +237,46 @@ class PBFTNode(pbft_pb2_grpc.PBFTNodeServicer):
 
     # ========== Commit ==========
     def Commit(self, msg, context):
-        tag_seq = self.log_tag(view=msg.view, seq=msg.seq, block_hash=msg.block_hash)
+            tag_seq = self.log_tag(view=msg.view, seq=msg.seq, block_hash=msg.block_hash)
 
-        if msg.sender_id in self.blacklist:
-            self.logger.warning(f"{tag_seq} - [blocked]: Node {msg.sender_id} in BlackList")
-            return pbft_pb2.Ack(success=False)
+            if msg.sender_id in self.blacklist:
+                self.logger.warning(f"{tag_seq} - [blocked]: Node {msg.sender_id} in blacklist")
+                return pbft_pb2.Ack(success=False)
 
-        key = (msg.view, msg.seq)
-        if key not in self.pre_prepares:
-            self.logger.warning(f"{tag_seq} - [ignored]: No PrePrepare recorded for Commit")
-            return pbft_pb2.Ack(success=False)
+            key = (msg.view, msg.seq)
+            if key not in self.pre_prepares:
+                self.pending_commits[key].append(msg)
+                self.logger.warning(f"{tag_seq} - [queued]: Commit before PrePrepare")
+                return pbft_pb2.Ack(success=False)
 
-        proposed_block = self.pre_prepares[key]
-        if proposed_block.hash != msg.block_hash:
-            self.logger.warning(f"{tag_seq} - [mismatch]: Commit hash != PrePrepare hash → blacklist sender")
-            # False comments are strong evidence; blacklist immediately.
-            self.blacklist.add(msg.sender_id)
-            return pbft_pb2.Ack(success=False)
+            proposed_block = self.pre_prepares[key]
 
-        # Record commit
-        commit_set = self.commits[key][msg.block_hash]
-        if msg.sender_id in commit_set:
-            self.logger.warning(f"{tag_seq} - [ignored]: Duplicate Commit from Node {msg.sender_id}")
-            return pbft_pb2.Ack(success=False)
+            if proposed_block.hash != msg.block_hash:
+                self.logger.warning(f"{tag_seq} - [mismatch]: Commit hash does not match PrePrepare hash -> blacklist sender")
+                self.blacklist.add(msg.sender_id)
+                return pbft_pb2.Ack(success=False)
 
-        commit_set.add(msg.sender_id)
-        self.logger.info(f"{tag_seq} - [COMMIT]: Count={len(commit_set)}")
+            commit_set = self.commits[key][msg.block_hash]
+            if msg.sender_id in commit_set:
+                self.logger.warning(f"{tag_seq} - [ignored]: Duplicate Commit from Node {msg.sender_id}")
+                return pbft_pb2.Ack(success=False)
 
-        # If we reach 2f+1 commits, ensure prepared locally (auto-mark if needed) and append
-        if len(commit_set) >= (2 * self.f + 1):
-            if (msg.view, msg.seq, msg.block_hash) not in self.prepared:
-                # Auto-mark prepared (we have pre-prepare; commits imply enough agreement)
-                self.prepared.add((msg.view, msg.seq, msg.block_hash))
-                self.logger.info(f"{tag_seq} - [state]: Auto-mark PREPARED due to 2f+1 commits")
+            commit_set.add(msg.sender_id)
+            self.logger.info(f"{tag_seq} - [COMMIT]: Count={len(commit_set)}")
 
-            if (not self.blockchain) or (self.blockchain[-1].hash == proposed_block.prev_hash):
-                self.blockchain.append(proposed_block)
-                self.last_committed_seq = msg.seq
-                self.logger.info(f"{tag_seq} - [state]: COMMITTED-LOCAL (2f+1 commits)")
-            else:
-                self.logger.error(f"{tag_seq} - [error]: Prev_hash mismatch at commit; not appending")
+            if len(commit_set) >= (2 * self.f + 1):
+                if (msg.view, msg.seq, msg.block_hash) not in self.prepared:
+                    self.prepared.add((msg.view, msg.seq, msg.block_hash))
+                    self.logger.info(f"{tag_seq} - [state]: Auto-mark PREPARED due to 2f+1 commits")
 
-        return pbft_pb2.Ack(success=True)
+                if (not self.blockchain) or (self.blockchain[-1].hash == proposed_block.prev_hash):
+                    self.blockchain.append(proposed_block)
+                    self.last_committed_seq = msg.seq
+                    self.logger.info(f"{tag_seq} - [state]: COMMITTED-LOCAL (2f+1 commits)")
+                else:
+                    self.logger.error(f"{tag_seq} - [error]: Prev_hash mismatch at commit; block not appended")
+
+            return pbft_pb2.Ack(success=True)
 
     # ========== Node Status ==========
     def NodeStatus(self, request, context):
@@ -319,21 +309,22 @@ def main():
     parser.add_argument("--id", type=int, required=True)
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--byzantine", action="store_true")
+    parser.add_argument("--num_nodes", type=int, default=NUM_NODES)
     args = parser.parse_args()
 
-    # With f=F, PBFT requires N >= 3f + 1; here N=NUM_NODES
-    peers = {i: f"localhost:{50050+i}" for i in range(NUM_NODES)}
+    num_nodes = args.num_nodes
+    f = (num_nodes - 1) // 3
+    peers = {i: f"localhost:{50050+i}" for i in range(num_nodes)}
 
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     pbft_pb2_grpc.add_PBFTNodeServicer_to_server(
-        PBFTNode(args.id, peers, f=F, is_byzantine=args.byzantine),
+        PBFTNode(args.id, peers, f=f, is_byzantine=args.byzantine),
         server
     )
     server.add_insecure_port(f"[::]:{args.port}")
     server.start()
-    print(f"Node {args.id} running on port {args.port}")
+    print(f"Node {args.id} running on port {args.port} (N={num_nodes}, f={f})")
     server.wait_for_termination()
-
 
 
 if __name__ == "__main__":

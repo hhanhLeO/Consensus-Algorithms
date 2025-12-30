@@ -1,14 +1,25 @@
-import time
 import grpc
+import argparse
 from block import Block
 import pbft_pb2
 import pbft_pb2_grpc
+import time
+import os
+
 
 NUM_NODES = 5
-F = 1  # fault tolerance
 
+if os.path.exists("cluster.conf"):
+    try:
+        with open("cluster.conf") as fconf:
+            NUM_NODES = int(fconf.read().strip())
+    except Exception:
+        pass  # If there is an error, the default settings will remain.
+
+F = (NUM_NODES - 1) // 3
 PRIMARY_ADDR = "localhost:50050"
 PEERS = {i: f"localhost:{50050+i}" for i in range(NUM_NODES)}
+
 
 def send_block(block):
     with grpc.insecure_channel(PRIMARY_ADDR) as ch:
@@ -51,7 +62,7 @@ def print_status(status):
 
 def wait_quorum_for_block(target_hash, timeout_sec=20, poll_interval=0.5):
     deadline = time.time() + timeout_sec
-    needed = F + 1
+    needed = 2 * F + 1
     while time.time() < deadline:
         count = 0
         for _, addr in PEERS.items():
@@ -72,7 +83,7 @@ def menu():
         print("\nMenu:")
         print("1. Create block")
         print("2. Create multiple blocks")
-        print("3. View node status (blockchain, quorum)")
+        print("3. View node status (blockchain, quorum, blacklist)")
         print("4. Exit")
         choice = input("Select: ")
 
