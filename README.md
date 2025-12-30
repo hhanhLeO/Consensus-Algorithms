@@ -74,7 +74,7 @@ python raft_client.py --num_nodes 7 --base_port 8000 # run 7 nodes and base port
 
 ## pBFT
 
-### Run code
+### Run nodes
 - Run `start_cluster.py`
 ```bash
 cd pbft
