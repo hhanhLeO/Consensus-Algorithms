@@ -5,7 +5,6 @@ import raft_pb2_grpc
 import random
 import time
 import threading
-import sys
 import os
 import json
 import argparse
@@ -150,7 +149,7 @@ class Raft(raft_pb2_grpc.RaftServicer):
     def RequestVote(self, request, context):
         """Handle RequestVote RPC"""
         with self.lock:
-            print(f"[Node {self.node_id}] received RequestVote from Node {request.candidate_id}")
+            print(f"[Node {self.node_id}] received RequestVote from Node {request.candidate_id} - term {request.term}")
 
             # Reject if term is older than current term
             if request.term < self.current_term:
@@ -179,7 +178,7 @@ class Raft(raft_pb2_grpc.RaftServicer):
                     self.voted_for = request.candidate_id
                     self.save_persistent_state()
                     self.reset_election_timer()
-                    print(f"[Node {self.node_id}] granted vote to Node {request.candidate_id}")
+                    print(f"[Node {self.node_id}] granted vote to Node {request.candidate_id} - term {request.term}")
 
             return raft_pb2.VoteResponse(
                 term=self.current_term,

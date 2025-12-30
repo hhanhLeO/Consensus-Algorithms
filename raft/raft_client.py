@@ -2,7 +2,6 @@ import grpc
 import raft_pb2
 import raft_pb2_grpc
 import time
-import sys
 import argparse
 
 DEFAULT_NUM_NODES = 5
