@@ -8,7 +8,12 @@ import threading
 import sys
 import os
 import json
+import argparse
 from enum import Enum
+
+# Default configuration
+DEFAULT_NUM_NODES = 5
+DEFAULT_BASE_PORT = 50050
 
 class NodeState(Enum):
     FOLLOWER = 1
@@ -24,7 +29,7 @@ class Raft(raft_pb2_grpc.RaftServicer):
         # Time configurations
         self.ELECTION_TIMEOUT_MIN = 8.0
         self.ELECTION_TIMEOUT_MAX = 10.0
-        self.TICK_RATE = 0.5
+        self.TICK_RATE = random.uniform(0.1, 0.5)
         self.HEARTBEAT_INTERVAL = 2.0
         self.RPC_TIMEOUT = 1.0
 
@@ -439,9 +444,18 @@ class Raft(raft_pb2_grpc.RaftServicer):
                 elif elapsed > self.election_timeout:
                     threading.Thread(target=self.start_election, daemon=True).start()
 
+def get_cluster_config(num_nodes=5, base_port=50050):
+    """Generate cluster configuration dynamically"""
+    peers = {}
+    for i in range(num_nodes):
+        peers[i] = f'localhost:{base_port + i}'
+    return peers
 
-def start_server(node_id, peers, port):
+def start_server(node_id, num_nodes=5, base_port=50050):
     """Start the gRPC server for a Raft node"""
+    peers = get_cluster_config(num_nodes, base_port)
+    port = base_port + node_id
+
     node = Raft(node_id, peers, port)
 
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
@@ -460,20 +474,11 @@ def start_server(node_id, peers, port):
         server.stop(0)
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python raft_node.py <node_id>")
-        sys.exit(1)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--id", type=int, required=True)
+    parser.add_argument("--num_nodes", type=int, default=DEFAULT_NUM_NODES)
+    parser.add_argument("--base_port", type=int, default=DEFAULT_BASE_PORT)
 
-    node_id = int(sys.argv[1])
+    args = parser.parse_args()
 
-    # Default configuration for 5 nodes
-    peers = {
-        0: "localhost:50050",
-        1: "localhost:50051",
-        2: "localhost:50052",
-        3: "localhost:50053",
-        4: "localhost:50054"
-    }
-
-    port = 50050 + node_id
-    start_server(node_id, peers, port)
+    start_server(args.id, args.num_nodes, args.base_port)

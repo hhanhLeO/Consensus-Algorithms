@@ -3,6 +3,10 @@ import raft_pb2
 import raft_pb2_grpc
 import time
 import sys
+import argparse
+
+DEFAULT_NUM_NODES = 5
+DEFAULT_BASE_PORT = 50050
 
 class RaftClient:
     def __init__(self, nodes):
@@ -167,16 +171,23 @@ def print_menu():
     print("6. Exit")
     print("="*60)
 
+def get_cluster_config(num_nodes=5, base_port=50050):
+    """Generate cluster configuration dynamically"""
+    peers = {}
+    for i in range(num_nodes):
+        peers[i] = f'localhost:{base_port + i}'
+    return peers
+
 def main():
-    # Default configuration for 5 nodes
-    nodes = {
-        0: "localhost:50050",
-        1: "localhost:50051",
-        2: "localhost:50052",
-        3: "localhost:50053",
-        4: "localhost:50054"
-    }
-    
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--num_nodes", type=int, default=DEFAULT_NUM_NODES)
+    parser.add_argument("--base_port", type=int, default=DEFAULT_BASE_PORT)
+
+    args = parser.parse_args()
+
+    nodes = get_cluster_config(args.num_nodes, args.base_port)
+    print(nodes)
+
     client = RaftClient(nodes)
     
     while True:
@@ -192,14 +203,14 @@ def main():
             client.send_command(command, leader_hint)
         
         elif choice == "2":
-            node_id = int(input("Enter node ID to isolate (0-4): "))
+            node_id = int(input(f"Enter node ID to isolate (0-{args.num_nodes - 1}): "))
             if node_id in nodes:
                 others = [n for n in nodes if n != node_id]
                 client.isolate_node(node_id, others)
                 print(f"Node {node_id} was isolated from cluster")
         
         elif choice == "3":
-            node_id = int(input("Enter node ID to reconnect (0-4): "))
+            node_id = int(input(f"Enter node ID to reconnect (0-{args.num_nodes - 1}): "))
             if node_id in nodes:
                 client.clear_partition(node_id)
                 print(f"Node {node_id} reconnected to cluster")
@@ -215,8 +226,16 @@ def main():
         
         elif choice == "5":
             print("Splitting network into two groups")
-            group1 = [0, 1, 2]
-            group2 = [3, 4]
+            group1_input = input("Enter Group 1 node IDs (comma-separated, e.g. 0,1,2): ").strip()
+            group2_input = input("Enter Group 2 node IDs (comma-separated, e.g. 3,4): ").strip()
+
+            try:
+                group1 = [int(x.strip()) for x in group1_input.split(",") if x.strip() != ""]
+                group2 = [int(x.strip()) for x in group2_input.split(",") if x.strip() != ""]
+            except ValueError:
+                print("Invalid input. Please enter only numbers separated by commas.")
+                continue
+
             print(f"Group 1: {group1}")
             print(f"Group 2: {group2}")
             
