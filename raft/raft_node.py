@@ -141,22 +141,10 @@ class Raft(raft_pb2_grpc.RaftServicer):
             return raft_pb2_grpc.RaftStub(channel)
         except:
             return None
-        
-    def is_peer_blocked(self, peer_id):
-        """Check if a peer is blocked (for incoming requests)"""
-        return peer_id in self.blocked_peers
     
     def RequestVote(self, request, context):
         """Handle RequestVote RPC"""
         with self.lock:
-            # if self.is_peer_blocked(request.candidate_id):
-            #     print(f"[Node {self.node_id}] blocked RequestVote from {request.candidate_id}")
-            #     context.abort(
-            #         grpc.StatusCode.UNAVAILABLE,
-            #         "Network partition - peer is blocked"
-            #     )
-            #     return
-
             print(f"[Node {self.node_id}] received RequestVote from Node {request.candidate_id}")
 
             # Reject if term is older than current term
@@ -195,15 +183,7 @@ class Raft(raft_pb2_grpc.RaftServicer):
                              
     def AppendEntries(self, request, context):
         """Handle AppendEntries RPC (Heartbeat and Log replication)"""
-        with self.lock:
-            # if self.is_peer_blocked(request.leader_id):
-            #     print(f"[Node {self.node_id}] blocked RequestVote from {request.candidate_id}")
-            #     context.abort(
-            #         grpc.StatusCode.UNAVAILABLE,
-            #         "Network partition - peer is blocked"
-            #     )
-            #     return
-            
+        with self.lock:            
             # Reject if term is old
             if request.term < self.current_term:
                 return raft_pb2.AppendEntriesResponse(
@@ -305,7 +285,7 @@ class Raft(raft_pb2_grpc.RaftServicer):
                     if peer_addr == addr:
                         self.blocked_peers.add(peer_id)
             print(f"[Node {self.node_id}] Network partition: blocked {self.blocked_peers}")
-            return raft_pb2.PartitionResponse(success=True)       
+            return raft_pb2.PartitionResponse(success=True)  
 
     def start_election(self):
         """Start leader election"""
