@@ -75,7 +75,7 @@ python raft_client.py --num_nodes 7 --base_port 8000 # run 7 nodes and base port
 ## pBFT
 
 ### Run nodes
-- Run `start_cluster.py`
+- Run `start_cluster.py`: to generate Python gRPC code from the pBFT protocol definition and run nodes
 ```bash
 cd pbft
 python start_cluster.py
